@@ -3,12 +3,15 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"flag"
 	"fmt"
 	"github.com/kurrik/json"
 	"github.com/kurrik/twittergo"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -121,20 +124,16 @@ func filterStream(client *twittergo.Client, path string, query url.Values) (err 
 			tweet := &twittergo.Tweet{}
 			err := json.Unmarshal(data, tweet)
 			if err == nil {
-				for i := 0; i < 100; i++ {
-					var n = len(index)
-					if n == maxTweetsCount {
-						copy(index, index[1:n])
-						index = index[:n-1]
-						copy(tweets, tweets[1:n])
-						tweets = tweets[:n-1]
-					}
-
-					index = append(index, tweet.Id())
-					tweets = append(tweets, string(data))
+				var n = len(index)
+				if n == maxTweetsCount {
+					copy(index, index[1:n])
+					index = index[:n-1]
+					copy(tweets, tweets[1:n])
+					tweets = tweets[:n-1]
 				}
-				fmt.Println("index:", len(index), cap(index))
-				fmt.Println("tweets:", len(tweets), cap(tweets))
+
+				index = append(index, tweet.Id())
+				tweets = append(tweets, string(data))
 			}
 		}
 	}()
@@ -147,19 +146,68 @@ func filterStream(client *twittergo.Client, path string, query url.Values) (err 
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
-	var start = 100
-	var length = 100
-	var end = start + length
+	var (
+		start int
+		end   int
+		count int = 100
+	)
+
+	q := r.URL.Query()
+
+	if c, err := strconv.Atoi(q.Get("count")); err == nil {
+		if c > 0 && c <= 200 {
+			count = c
+		}
+	}
+
+	if sinceId, err := strconv.ParseUint("since_id", 10, 64); err == nil {
+		if idx := indexUInt64(index, sinceId); idx >= 0 {
+			start = idx
+			if start+count > maxTweetsCount {
+				end = maxTweetsCount
+			} else {
+				end = start + count
+			}
+		}
+	} else if maxId, err := strconv.ParseUint("max_id", 10, 64); err == nil {
+		fmt.Println("max_id", maxId)
+		if idx := indexUInt64(index, maxId); idx >= 0 {
+			fmt.Println("idx", idx)
+			end = idx
+			if idx > count {
+				start = idx - count
+			} else {
+				start = 0
+			}
+		}
+	} else {
+		end = len(index)
+		if end-count > 0 {
+			start = end - count
+		} else {
+			start = 0
+		}
+	}
+
 	if start >= maxTweetsCount || start >= len(tweets) {
 		http.Error(w, "{error: \"Invalid parameter\"}", http.StatusBadRequest)
 		return
 	}
 
-	if end > maxTweetsCount {
-		end = maxTweetsCount
-	}
+	fmt.Fprint(w, "["+strings.Join(tweets[start:end], ",")+"]")
+}
 
-	fmt.Fprint(w, tweets[start:end])
+type args struct {
+	host string
+	port int
+}
+
+func parseArgs() *args {
+	a := &args{}
+	flag.StringVar(&a.host, "host", "localhost", "etcd host")
+	flag.IntVar(&a.port, "port", 2379, "etcd port")
+	flag.Parse()
+	return a
 }
 
 func main() {
@@ -167,8 +215,10 @@ func main() {
 		err    error
 		client *twittergo.Client
 	)
+
+	args := parseArgs()
 	if client, err = loadCredentials(
-		"http://192.168.64.3:2379",
+		"http://"+args.host+":"+strconv.Itoa(args.port),
 		"/twi-at-idle/credentials"); err != nil {
 		fmt.Printf("Could not parse CREDENTIALS file: %v\n", err)
 		os.Exit(1)
